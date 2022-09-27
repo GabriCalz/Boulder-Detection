@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Sep 26 16:07:28 2022
+
+@author: weiqi
+"""
+
+#Imports that are needed
+import math
+import numpy as np
+import open3d as o3d
+import pyransac3d as pyrsc 
+import matplotlib.pyplot as plt
+import pandas as pd
+from enum import Enum
+
+class UnsupervisedMethods(Enum):
+    RANSAC = 1
+    PoissonSurfaceReconstruction = 2
+Method = UnsupervisedMethods.RANSAC
+
+
+#Useful generic parameters
+NEARSHORE_DATA = "/home/weiqi/Desktop/Boulder Detection/HOW04_Nearshore_DTM_025M.xyz"
+WINDOW_START = 0
+NUMBER_DATA = 500000
+RANSAC_THRESHOLD = 0.256
+PSR_THRESHOLD = 0.256
+
+""" Type of Boulder Detection. Set:
+1 for RANSAC & Clustering, 2 for analysis with Poisson Surface Reconstruction """
+BOULDER_DETECTION = 1   
+
+class Engine_PSR(object):
+    
+    def __init__(self, pcd, pointData, numberOfData, colorArray, threshold):
+        self.pcd = pcd
+        self.pointData = pointData
+        self.numberOfData = numberOfData
+        self.colorArray = colorArray
+        self.threshold = threshold
+    
+    def boulderDetection(self):
+        
+        print('run Poisson surface reconstruction')
+        self.pcd.estimate_normals()
+        with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
+                mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(self.pcd, depth=9)
+        print(mesh)
+        o3d.visualization.draw_geometries([mesh])
+        
+        mesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+    
+        
+        scene = o3d.t.geometry.RaycastingScene()
+        _ = scene.add_triangles(mesh)  # we do not need the geometry ID for mesh
+        self.colorArray = np.zeros((self.numberOfData, 3)) #create a vector with gradient color (red)
+    
+        obstacle2 = 0
+        obs = []
+        for i in range(self.numberOfData):
+            query_point = o3d.core.Tensor([[self.pointData[i,0], self.pointData[i,1], self.pointData[i,2]]], dtype=o3d.core.Dtype.Float32)
+            distance = scene.compute_distance(query_point)
+            if distance > self.threshold:
+                obstacle2 += 1
+                obs.append(np.array([self.pointData[i,0], self.pointData[i,1], self.pointData[i,2]]))
+                self.colorArray[i, :] = [255, 255, 0]
+        
+        obs = np.matrix(obs)
+        with open('/home/weiqi/Desktop/Boulder Detection/outfile.txt','wb') as f:
+            for line in obs:
+                np.savetxt(f, line, fmt='%.2f')
+            
+        self.pcd.points = o3d.utility.Vector3dVector(self.pointData)
+        self.pcd.colors = o3d.utility.Vector3dVector(self.colorArray.astype(float) / 255.0)
+    
+    
+        o3d.visualization.draw_geometries([self.pcd])
+        print("Boulder Ratio: ", (obstacle2/self.numberOfData)*100)
+        
+class Engine_RANSAC(object):
+    
+    def __init__(self, pcd, pointData, numberOfData, colorArray, threshold):
+        self.pcd = pcd
+        self.pointData = pointData
+        self.numberOfData = numberOfData
+        self.colorArray = colorArray
+        self.threshold = threshold
+        
+    
+    def distancePointFromPlane(self, x, y, z, A, B, C, D):
+        return abs(A*x+B*y+C*z+D)/math.sqrt(A**2+B**2+C**2)
+    
+    def boulderDetection(self):
+    
+        print("Boulder detection with RANSAC")
+        modelOfSeaBed = pyrsc.Plane()
+        bestEquation, bestInliers = modelOfSeaBed.fit(self.pointData, self.threshold)
+        obstacles = 0;
+        obs = []
+        for i in range(self.numberOfData):
+            distance = self.distancePointFromPlane(self.pointData[i,0], self.pointData[i,1], 
+                                              self.pointData[i,2], bestEquation[0], 
+                                              bestEquation[1], bestEquation[2], bestEquation[3])
+            if distance > self.threshold:
+                obs.append(np.array([self.pointData[i,0], self.pointData[i,1], self.pointData[i,2]]))
+                obstacles += 1
+                self.colorArray[i, :] = [255, 255, 0]
+                   
+        obs = np.matrix(obs)
+        with open('/home/weiqi/Desktop/Boulder Detection/outfile.txt','wb') as f:
+            for line in obs:
+                np.savetxt(f, line, fmt='%.2f')
+            
+        outlier_cloud = self.pcd.select_by_index(bestInliers, invert=True)
+        
+        labels = np.array(outlier_cloud.cluster_dbscan(eps=2, min_points=6))
+        max_label = labels.max()
+        colors = plt.get_cmap("tab20")(labels / (max_label if max_label > 0 else 1))
+        colors[labels < 0] = 0
+        outlier_cloud.colors = o3d.utility.Vector3dVector(colors[:, :3])
+        o3d.visualization.draw_geometries([outlier_cloud])
+        
+        self.pcd.points = o3d.utility.Vector3dVector(self.pointData)
+        self.pcd.colors = o3d.utility.Vector3dVector(self.colorArray.astype(float) / 255.0)
+              
+        o3d.visualization.draw_geometries([self.pcd])
+        print("Boulder Ratio: ", (obstacles/self.numberOfData)*100)
+         
+
+if __name__ == "__main__":
+
+    print("Start: Loading of the file containing the PointCloud ...")
+    point_cloud = np.loadtxt(NEARSHORE_DATA, skiprows=WINDOW_START, max_rows=NUMBER_DATA)
+    print (len(point_cloud))
+    print("PointCloud is loaded. Starting to render it")
+    pcd = o3d.geometry.PointCloud()
+    
+    minDepthSeabed = np.min( point_cloud[:, 2] ) 
+    maxDepthSeabed = np.max( point_cloud[:, 2] )
+    
+    colorArray = np.zeros((NUMBER_DATA, 3)) #create a vector with gradient color (red)
+    
+    for i in range(NUMBER_DATA):
+        colorArray[i, 0] = (((point_cloud[i, 2] - minDepthSeabed) * 255) / (maxDepthSeabed - minDepthSeabed))
+    
+    pcd.points = o3d.utility.Vector3dVector(point_cloud)
+    pcd.colors = o3d.utility.Vector3dVector(colorArray.astype(float) / 255.0)
+    
+    maxValueOfColor = np.max( colorArray[:, 0] )
+    minValueOfColor = np.min( colorArray[:, 0] )
+    
+    print("Min and Max of value of Depth: ", minDepthSeabed, ":", maxDepthSeabed)
+    print("Min and Max of value of Color: ", minValueOfColor, ":", maxValueOfColor)
+    print("A lighter red point means that the surface is deeper")
+    print("Showing the Data ...")
+    o3d.visualization.draw_geometries([pcd])
+    print("-----------------------------------------------------")
+    
+    
+    WS = pd.read_excel('/home/weiqi/Desktop/Boulder Detection/NorthShoreData/HOW04_Nearhore_MBES_Contacts.xlsx')
+    WS_np = np.array(WS)
+    
+    if Method == UnsupervisedMethods.RANSAC:
+       
+       #Boulder Detection with RANSAC algorithm and clusterization
+       
+       VisionOBJ = Engine_RANSAC(pcd, point_cloud, NUMBER_DATA, colorArray, RANSAC_THRESHOLD)
+          
+       VisionOBJ.boulderDetection()
+             
+    elif Method == UnsupervisedMethods.PoissonSurfaceReconstruction:
+        
+        #Boulder Detection with Poisson Surface Reconstruction
+        
+        VisionOBJ = Engine_PSR(pcd, point_cloud, NUMBER_DATA, colorArray, PSR_THRESHOLD)
+           
+        VisionOBJ.boulderDetection()
+        
+                
+    print("End of Script")
+ 

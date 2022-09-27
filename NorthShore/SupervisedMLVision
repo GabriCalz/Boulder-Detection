@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Sep 26 16:07:44 2022
+
+@author: weiqi
+"""
+
+#Imports that are needed
+import math
+import numpy as np
+import open3d as o3d
+import pyransac3d as pyrsc 
+import matplotlib.pyplot as plt
+import statistics as st
+import pandas as pd
+import random as rnd
+from enum import Enum
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import classification_report
+from sklearn.neural_network import MLPClassifier
+from sklearn import metrics
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.decomposition import PCA
+from scipy.stats import shapiro
+from sklearn.svm import SVC
+from sklearn.gaussian_process import GaussianProcessClassifier
+from sklearn.gaussian_process.kernels import RBF
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+
+class AIMethodType(Enum):
+    RandomForestClassifier = 1
+    KNNClassifier = 2
+    MLPClassifier = 3
+    SVCLinear = 4
+    SVCGamma = 5
+    GaussianProcessClass = 6
+    DecisionTreeClass = 7
+    AdaBoostClass = 8
+    GaussianNB = 9
+    QuadraticDiscrAnaly = 10
+    Compare = 11
+AI_METHOD = AIMethodType.Compare
+
+#Useful generic parameters
+WINDOW_START = 0
+NUMBER_DATA = 500000
+RANSAC_THRESHOLD = 0.256
+PSR_THRESHOLD = 0.256
+VOXEL_SIZE = 0.3
+
+FEATURES_FOLDER = "/home/weiqi/Desktop/Boulder Detection/NorthShoreData/Features/"
+FREESPOTSLOCATIONS_PATHFILE = FEATURES_FOLDER + "FreeSpotsLocations.csv"
+FREESPOTSFEATURES_PATHFILE = FEATURES_FOLDER + "FreeSpotsFeatures.csv"
+BOULDERSFEATURES_PATHFILE = FEATURES_FOLDER + "BouldersFeatures.csv" 
+BOULDERSLOCATIONS_PATHFILE = FEATURES_FOLDER + "BouldersLocations.csv"
+    
+NEARSHORE_DATA = "/home/weiqi/Desktop/Boulder Detection/HOW04_Nearshore_DTM_025M.xyz"   
+NORTHSHOREDATA_PATHFILE = '/home/weiqi/Desktop/Boulder Detection/NorthShoreData/HOW04_Nearhore_MBES_Contacts.xlsx'
+DELIMITER = "-------------------------------------------------------"
+
+FEATURES_NAME_LIST = ["Depth", "Standard Deviation 0.5", "Standard Deviation 1",	
+                      "Standard Deviation 2", "Standard Deviation 3", "Mean 0.5",
+                      "Mean 1", "Mean 2", "Mean 3", "Dz 0.5", "Dz 1", "Dz 2", "dz 3",
+                      "Dp 1", "Dp 2", "Dp 3", "Linearity", "Planarity", "Sphericity",
+                      "Omnivariance", "Anisotropy", "Change of Curvature", "Eigenentropy", "Scattering"]
+
+CONSIDEREDPOINTS_COLUMNS_LIST = ["Easting Coord",	"Northing Coord",	"Depth"]
+
+""" Type of Boulder Detection. Set:
+1 for RANSAC & Clustering, 2 for analysis with Poisson Surface Reconstruction """
+BOULDER_DETECTION = 3  
+
+class Engine_RandomForestClassifier(object):
+    
+    def __init__(self, pointData, dimensionSeaBed, colorArray, threshold, freeSpotsLocations_Pathfile = FREESPOTSLOCATIONS_PATHFILE, 
+                                                                          bouldersLocations_Pathfile = BOULDERSLOCATIONS_PATHFILE, 
+                                                                          freeSpotsFeatures_Pathfile = FREESPOTSFEATURES_PATHFILE, 
+                                                                          bouldersFeatures_Pathfile = BOULDERSFEATURES_PATHFILE,
+                                                                          northShoreData_Pathfile = NORTHSHOREDATA_PATHFILE,
+                                                                          featuresNameList = FEATURES_NAME_LIST):
+        self.pointData = pointData
+        self.colorArray = colorArray
+        self.threshold = threshold
+        self.numberOfData = len(pointData)
+        self.dimensionSeaBed = dimensionSeaBed
+        self.freeSpotsLocations_Pathfile = freeSpotsLocations_Pathfile
+        self.bouldersLocations_Pathfile = bouldersLocations_Pathfile
+        self.freeSpotsFeatures_Pathfile = freeSpotsFeatures_Pathfile
+        self.bouldersFeatures_Pathfile = bouldersFeatures_Pathfile
+        self.northShoreData_Pathfile = northShoreData_Pathfile
+        self.featuresNameList = featuresNameList
+        self.numberOfFeatures = len(self.featuresNameList)
+        
+    def insideSphere(self, point, center, radius):
+        return math.sqrt( (point[0]-center[0])**2 +
+                          (point[1]-center[1])**2 + 
+                          (point[2]-center[2])**2   ) <= radius
+
+    def distancePointFromPlane(self, x, y, z, A, B, C, D):
+        return abs(A*x+B*y+C*z+D)/math.sqrt(A**2+B**2+C**2)
+    
+    def computeFeatures(self, center):
+        
+        print("Call to Compute Features on the selected Point Cloud")
+        
+        Z = center[2]
+        pointCloud1 = np.empty([0,3]);
+        pointCloud2 = np.empty([0,3]);
+        pointCloud3 = np.empty([0,3]);
+        pointCloud05 = np.empty([0,3]);
+        
+        
+        for i in range(self.numberOfData):
+
+            if self.insideSphere(self.pointData[i,:], center, 0.5):
+                temp = np.array([self.pointData[i,0],self.pointData[i,1], self.pointData[i,2]])
+                pointCloud05 = np.vstack((pointCloud05, temp))
+                pointCloud1  = np.vstack((pointCloud1, temp))
+                pointCloud2  = np.vstack((pointCloud2, temp))
+                pointCloud3  = np.vstack((pointCloud3, temp))
+                
+            elif self.insideSphere(self.pointData[i,:], center, 1):
+                temp = np.array([self.pointData[i,0], self.pointData[i,1], self.pointData[i,2]])
+                pointCloud1 = np.vstack((pointCloud1, temp))
+                pointCloud2 = np.vstack((pointCloud2, temp))
+                pointCloud3 = np.vstack((pointCloud3, temp))
+                
+            elif self.insideSphere(self.pointData[i,:], center, 2):
+                temp = np.array([self.pointData[i,0], self.pointData[i,1], self.pointData[i,2]])
+                pointCloud2 = np.vstack((pointCloud2, temp))
+                pointCloud3 = np.vstack((pointCloud3, temp))
+                
+            elif self.insideSphere(self.pointData[i,:], center, 3):
+                temp = np.array([self.pointData[i,0], self.pointData[i,1], self.pointData[i,2]])
+                pointCloud3 = np.vstack((pointCloud3, temp))
+
+        STD = [st.stdev(pointCloud05[:,2]), st.stdev(pointCloud1[:,2]), st.stdev(pointCloud2[:,2]), st.stdev(pointCloud3[:,2]) ]
+        Mean = [st.mean(pointCloud05[:,2]), st.mean(pointCloud1[:,2]), st.mean(pointCloud2[:,2]), st.mean(pointCloud3[:,2]) ]
+        dz = [Z - min(pointCloud05[:,2]), Z - min(pointCloud1[:,2]), Z - min(pointCloud2[:,2]), Z - min(pointCloud3[:,2])]
+        
+        if len(pointCloud05) <=2:
+            omnivariance = 0
+            linearity = 0
+            planarity = 0
+            sphericity = 0
+            anisotropy = 0
+            surface_variation = 0
+        else:
+            
+            pcaPointCloud05 = PCA().fit(pointCloud05)
+            eigenvalues_3D = pcaPointCloud05.singular_values_ ** 2
+            norm_eigenvalues_3D = eigenvalues_3D / np.sum(eigenvalues_3D) 
+            
+            omnivariance = np.prod(norm_eigenvalues_3D) ** (1 / 3)
+            linearity = (norm_eigenvalues_3D[0] - norm_eigenvalues_3D[1]) / norm_eigenvalues_3D[0]
+            planarity = (norm_eigenvalues_3D[1] - norm_eigenvalues_3D[2]) / norm_eigenvalues_3D[0]
+            sphericity = norm_eigenvalues_3D[2]/norm_eigenvalues_3D[0]
+            anisotropy = (norm_eigenvalues_3D[0] - norm_eigenvalues_3D[2]) / norm_eigenvalues_3D[0]
+            surface_variation = norm_eigenvalues_3D[2]
+            scattering = norm_eigenvalues_3D[2] / norm_eigenvalues_3D[0]
+            nonnull_eig = norm_eigenvalues_3D[norm_eigenvalues_3D > 0]
+            eigenentropy = -1 * np.sum(nonnull_eig * np.log(nonnull_eig))
+        
+        modelOfSeaBed = pyrsc.Plane()
+        bestEquation1, _ = modelOfSeaBed.fit(pointCloud1, self.threshold)
+        bestEquation2, _ = modelOfSeaBed.fit(pointCloud2, self.threshold)
+        bestEquation3, _ = modelOfSeaBed.fit(pointCloud3, self.threshold)
+        
+        distance1 = self.distancePointFromPlane(center[0], center[1], center[2], bestEquation1[0], 
+                                          bestEquation1[1], bestEquation1[2], bestEquation1[3])
+        distance2 = self.distancePointFromPlane(center[0], center[1], center[2], bestEquation2[0], 
+                                          bestEquation2[1], bestEquation2[2], bestEquation2[3])
+        distance3 = self.distancePointFromPlane(center[0], center[1], center[2], bestEquation3[0], 
+                                          bestEquation3[1], bestEquation3[2], bestEquation3[3])
+        
+        featuresPacked = (Z, STD[0], STD[1], STD[2], STD[3], Mean[0], Mean[1], Mean[2], Mean[3], 
+                          dz[0], dz[1], dz[2], dz[3], distance1, distance2, distance3, linearity, 
+                          planarity, sphericity, omnivariance, anisotropy, surface_variation, eigenentropy,
+                          scattering)
+        
+        return featuresPacked
+    
+    def computeAnalitics(self, aiMethod, rf, train_features, train_labels, test_features, test_labels, feature_list):
+        
+        print(DELIMITER)
+        
+        if aiMethod == AIMethodType.RandomForestClassifier: print("Analytics about the Random Forest Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.KNNClassifier:        print("Analytics about the K-Neighbors Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.MLPClassifier:        print("Analytics about the Multi-Layer Perceptron Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.SVCLinear:            print("Analytics about the SVC Linear Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.SVCGamma:             print("Analytics about the SVC Gamma Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.GaussianProcessClass: print("Analytics about the Gaussian Process Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.DecisionTreeClass:    print("Analytics about the Decision Tree Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.AdaBoostClass:        print("Analytics about the Adaboost Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.GaussianNB:           print("Analytics about the Gaussian NB Classifier Model on the Point Cloud:")
+        elif aiMethod == AIMethodType.QuadraticDiscrAnaly:  print("Analytics about the Quadratic Discriminant Analysis Classifier Model on the Point Cloud:")
+        
+        predictions = rf.predict(test_features)
+        errors = abs(predictions - test_labels)
+        print('Mean Absolute Error:', round(np.mean(errors), 2))
+        meanAbsolutePercentageError = 100 * errors
+        accuracy = 100 - np.mean(meanAbsolutePercentageError)
+        print('Accuracy:', round(accuracy, 2), '%.')
+        
+        for i in range(len(predictions)):
+            predictions[i] = round(predictions[i])
+        print("Accuracy with Rounded Prediction Values:",metrics.accuracy_score(test_labels, predictions))
+        
+        print("Classification Report:")
+        print(classification_report(test_labels, predictions, target_names=['Free Spots','Boulders']))  
+        
+        if aiMethod == AIMethodType.RandomForestClassifier:
+            
+            print("Analysis of the importance of each Feature:")
+            importances = list(rf.feature_importances_) # List of tuples with variable and importance
+            feature_importances = [(feature, round(importance, 2)) for feature, importance in zip(feature_list, importances)]# Sort the feature importances by most important first
+            feature_importances = sorted(feature_importances, key = lambda x: x[1], reverse = True)# Print out the feature and importances 
+            [print('Variable: {:20} Importance: {}'.format(*pair)) for pair in feature_importances];
+            
+            #New random forest with only the two most important variables
+            rf_most_important = RandomForestRegressor(n_estimators= 1000, random_state=42)# Extract the two most important features
+            important_indices = [ feature_list.to_list().index('Standard Deviation 0.5'), feature_list.to_list().index('Sphericity')]
+            #important_indices = [ feature_list.to_list().index('1'), feature_list.to_list().index('13')]
+    
+            train_important = train_features[:, important_indices]
+            test_important = test_features[:, important_indices]# Train the random forest
+            rf_most_important.fit(train_important, train_labels)# Make predictions and determine the error
+            predictions = rf_most_important.predict(test_important)
+            errors = abs(predictions - test_labels)# Display the performance metrics
+            print('Mean Absolute Error:', round(np.mean(errors), 2))
+            mape = np.mean(100 * errors)
+            accuracy = 100 - mape
+            print('Accuracy with reduced number of features:', round(accuracy, 2), '%.')
+            
+            # Import matplotlib for plotting and use magic command for Jupyter Notebooks
+            
+            plt.style.use('fivethirtyeight')# list of x locations for plotting
+            x_values = list(range(len(importances)))# Make a bar chart
+            plt.bar(x_values, importances, orientation = 'vertical')# Tick labels for x axis
+            fl = feature_list.to_list()
+            plt.xticks(x_values, fl, rotation='vertical')# Axis labels and title
+            plt.ylabel('Importance'); plt.xlabel('Variable'); plt.title('Variable Importances');
+            plt.show()
+            
+    def validation(self, rf, validation_features, validation_labels):
+        print("Validation")
+        
+        predictionsV = rf.predict(validation_features)
+        errors = abs(predictionsV - validation_labels)
+        print('Mean Absolute Error:', round(np.mean(errors), 2))
+        meanAbsolutePercentageError = 100 * errors
+        accuracy = 100 - np.mean(meanAbsolutePercentageError)
+        print('Accuracy:', round(accuracy, 2), '%.')
+        
+        for i in range(len(predictionsV)):
+            predictionsV[i] = round(predictionsV[i])
+        print("Accuracy with Rounded Prediction Values:",metrics.accuracy_score(validation_labels, predictionsV))
+        
+        print("Classification Report:")
+        print(classification_report(validation_labels, predictionsV, target_names=['Free Spots','Boulders']))  
+        
+    def computeIAClassifierModel(self, aiMethod):
+        
+        features = pd.read_csv(self.bouldersFeatures_Pathfile)
+        features=features.drop(features.columns[0], axis = 1)
+        feature_list = features.columns
+        
+        featuresTableWithoutBoulders = pd.read_csv(self.freeSpotsFeatures_Pathfile)
+        featuresTableWithBoulders = pd.read_csv(self.bouldersFeatures_Pathfile)
+        features = pd.concat([featuresTableWithBoulders, featuresTableWithoutBoulders])
+        features = features.iloc[: , 1:self.numberOfFeatures+1]
+        
+        for i in range (self.numberOfFeatures-1):
+            stat, p = shapiro(features.to_numpy()[:,i])
+            print("Column ", i, ": stat =", stat, " , p=", p)
+            if p>0.05: 
+                print("Probably gaussian")
+            
+        targets = np.append(np.repeat(1, len(featuresTableWithBoulders)).transpose(), 
+                            np.repeat(0, len(featuresTableWithoutBoulders)).transpose(), 
+                            axis=0)
+
+        features = MinMaxScaler().fit_transform(features)
+        ftn = len(features)
+        train_features, test_features, train_labels, test_labels = train_test_split(features, targets, test_size = 0.25, random_state = 42)
+        validation_features, test_features, validation_labels, test_labels = train_test_split(test_features, test_labels, test_size = 0.5, random_state = 42)
+        print('Training Features Shape:', train_features.shape)
+        print('Training Labels Shape:', train_labels.shape)
+        print('Testing Features Shape:', test_features.shape)
+        print('Testing Labels Shape:', test_labels.shape)
+        print('Testing Features Shape:', validation_features.shape)
+        print('Testing Labels Shape:', validation_labels.shape)
+        pt = (len(train_features)/ftn)*100
+        pv = (len(validation_features)/ftn)*100
+        ptt = (len(test_features)/ftn)*100
+        print("Training: ", pt, " Validation: ", pv, " Testing: ", ptt)
+        
+        if aiMethod == AIMethodType.RandomForestClassifier:
+            rf = RandomForestRegressor(n_estimators = 1000, random_state = 42)# Train the model on training data  
+            rf.fit(train_features, train_labels);
+            self.computeAnalitics(aiMethod, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+        elif aiMethod == AIMethodType.KNNClassifier:
+            rf = KNeighborsClassifier()
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(aiMethod, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+        elif aiMethod == AIMethodType.MLPClassifier:
+            rf = MLPClassifier() #solver='lbfgs', alpha=1e-5,hidden_layer_sizes=(15, 2), random_state=1
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(aiMethod, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+        elif aiMethod == AIMethodType.Compare:
+            rf = RandomForestRegressor(n_estimators = 1000, random_state = 42 )# Train the model on training data      
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.RandomForestClassifier, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf = KNeighborsClassifier()
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.KNNClassifier, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf = MLPClassifier() #solver='lbfgs', alpha=1e-5,hidden_layer_sizes=(15, 2), random_state=1
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.MLPClassifier, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf = SVC(kernel="linear", C=0.025)
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.SVCLinear, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf = SVC(gamma=2, C=1)
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.SVCGamma, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf = GaussianProcessClassifier(1.0 * RBF(1.0))
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.GaussianProcessClass, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf =  DecisionTreeClassifier(max_depth=5)
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.DecisionTreeClass, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf = AdaBoostClassifier()
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.AdaBoostClass, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf = GaussianNB()
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.GaussianNB, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+            rf =  QuadraticDiscriminantAnalysis()
+            rf.fit(train_features, train_labels)
+            self.computeAnalitics(AIMethodType.QuadraticDiscrAnaly, rf, train_features, train_labels, test_features, test_labels, feature_list)
+            self.validation(rf, validation_features, validation_labels)
+    def colorPickedAreasInPointCloud(self):
+        
+        featuresWithoutBoulders = pd.read_csv(self.freeSpotsLocations_Pathfile).to_numpy()
+        featuresWithBoulders = pd.read_csv(self.bouldersLocations_Pathfile).to_numpy()       
+    
+        for i in range(self.numberOfData):
+            for j in range(len(featuresWithoutBoulders)):
+                if self.insideCircle(self.pointData[i,0], self.pointData[i,1], featuresWithoutBoulders[j,1], featuresWithoutBoulders[j,2], 1):
+                    self.colorArray[i, :] = [0,255,0]
+            for k in range(len(featuresWithBoulders)):
+                if self.insideCircle(self.pointData[i,0], self.pointData[i,1], featuresWithBoulders[k,2], featuresWithBoulders[k,3], 1):
+                    self.colorArray[i, :] = [0,0,255]
+                    
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(self.pointData)
+        pcd.colors = o3d.utility.Vector3dVector(self.colorArray.astype(float) / 255.0)
+        o3d.visualization.draw_geometries([pcd])
+        
+    def computeBouldersFeatures(self):
+        
+        northShoreData = np.array(pd.read_excel(self.northShoreData_Pathfile))
+        
+        manualPick = northShoreData[1757:6629, 1:4]
+        
+        featureTable =  np.empty((0, self.numberOfFeatures))
+        labelsConsidered = np.empty((0, 3))
+        
+        for row in manualPick:
+            if self.dimensionSeaBed[0]<=row[0]<=self.dimensionSeaBed[1] and self.dimensionSeaBed[2]<=row[1]<=self.dimensionSeaBed[3]:
+                feat = self.computeFeatures(row.tolist())
+                featureTable = np.append(featureTable, np.asarray(feat).reshape((1, len(feat))) , axis=0)
+                labelsConsidered = np.append(labelsConsidered, np.array([[ row[0], row[1], row[2]]]), axis=0)
+        
+        featuresDataframe = pd.DataFrame(featureTable)
+        featuresDataframe.columns = FEATURES_NAME_LIST
+        featuresDataframe.to_csv(self.bouldersFeatures_Pathfile)
+        
+        consideredPoints = pd.DataFrame(labelsConsidered)
+        consideredPoints.columns = CONSIDEREDPOINTS_COLUMNS_LIST
+        consideredPoints.to_csv(self.bouldersLocations_Pathfile)
+        
+        return len(labelsConsidered)
+
+        
+    def computeFreeSpotsFeatures(self, numberOfBouldersTraining):
+    
+        northShoreData = np.array(pd.read_excel(self.northShoreData_Pathfile))
+        manualPick = northShoreData[1757:6629, 1:4]
+                
+        freeSpotsLocations = np.empty((0, 3))
+        
+        i=1
+        while i<=numberOfBouldersTraining:
+            
+            index = rnd.randrange(self.numberOfData)
+            point = self.pointData[index, :]
+            tooClose = False
+            for row in manualPick:
+                if self.insideSphere(row, point, 2):
+                    tooClose = True
+            if not tooClose:
+                freeSpotsLocations = np.append(freeSpotsLocations, np.array([[point[0], point[1], point[2]]]), axis=0)
+                i+=1
+        
+        featureTable =  np.empty((0, self.numberOfFeatures))
+        labelsConsidered = np.empty((0, 3))
+        
+        for row in freeSpotsLocations:
+            if self.dimensionSeaBed[0]<=row[0]<=self.dimensionSeaBed[1] and self.dimensionSeaBed[2]<=row[1]<=self.dimensionSeaBed[3]:
+                feat = self.computeFeatures(row.tolist())
+                featureTable = np.append(featureTable, np.asarray(feat).reshape((1, len(feat))) , axis=0)
+                labelsConsidered = np.append(labelsConsidered, np.array([[row[0], row[1], row[2]]]), axis=0)
+                
+        featuresDataframe = pd.DataFrame(featureTable)
+        featuresDataframe.columns = FEATURES_NAME_LIST
+        featuresDataframe.to_csv(self.freeSpotsFeatures_Pathfile)
+        
+        consideredPoints = pd.DataFrame(labelsConsidered)
+        consideredPoints.columns = CONSIDEREDPOINTS_COLUMNS_LIST
+        consideredPoints.to_csv(self.freeSpotsLocations_Pathfile)
+        
+        
+if __name__ == "__main__":
+    
+    print("Point Cloud Feature Processing")
+    #NUMBER_DATA = int(input("How many starting points do you want to consider?"))
+    print("Number of points: ", NUMBER_DATA)
+    print(DELIMITER)
+    print("Start: Loading of the file containing the PointCloud ...")
+    point_cloud_full = np.loadtxt(NEARSHORE_DATA, skiprows=(WINDOW_START+1), max_rows=NUMBER_DATA) 
+    print("PointCloud is loaded. Starting to render it")
+    print(DELIMITER)
+    
+    pcd = o3d.geometry.PointCloud()
+    fullPcd = o3d.geometry.PointCloud()
+    
+    fullPcd.points = o3d.utility.Vector3dVector(point_cloud_full)
+    o3d.visualization.draw_geometries([fullPcd])
+    
+    print("Downsampling with voxel dimension of ", VOXEL_SIZE)
+    pcd = fullPcd.voxel_down_sample(VOXEL_SIZE)
+    point_cloud = np.asarray(pcd.points)
+    NUMBER_DATA = len(pcd.points)
+    print("The  new PointCloud has number of points: ", NUMBER_DATA)
+    o3d.visualization.draw_geometries([pcd])
+    
+    dimensionSeaBed = [np.min(point_cloud[:, 0]), np.max(point_cloud[:, 0]), 
+                        np.min(point_cloud[:, 1]), np.max(point_cloud[:, 1]),
+                        np.min(point_cloud[:, 2]), np.max(point_cloud[:, 2])]
+    
+    colorArray = np.zeros((NUMBER_DATA, 3)) #create a vector with gradient color (red)
+    
+    for i in range(NUMBER_DATA):
+        colorArray[i, 0] = (((point_cloud[i, 2] - dimensionSeaBed[4]) * 255) / (dimensionSeaBed[5] - dimensionSeaBed[4]))
+    
+    
+    pcd.colors = o3d.utility.Vector3dVector(colorArray.astype(float) / 255.0)
+
+    print("Dimensions SeaBed: ", dimensionSeaBed[0], ":", dimensionSeaBed[1], "&", dimensionSeaBed[2], ":", dimensionSeaBed[3], "&", dimensionSeaBed[4], ":", dimensionSeaBed[5])
+    print("Min and Max of value of Color: ", np.min( colorArray[:, 0] ), ":", np.max( colorArray[:, 0] ))
+    print("A lighter red point means that the surface is deeper")
+    print("Showing the Data ...")
+    o3d.visualization.draw_geometries([pcd])
+    print("-----------------------------------------------------")
+    
+    obj = Engine_RandomForestClassifier(point_cloud, dimensionSeaBed, colorArray, RANSAC_THRESHOLD)
+    #numberOfBoulders = obj.computeBouldersFeatures()
+    #obj.computeFreeSpotsFeatures(numberOfBoulders)
+    obj.computeIAClassifierModel(AI_METHOD)
